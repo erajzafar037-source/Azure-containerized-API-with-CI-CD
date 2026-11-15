@@ -1,0 +1,69 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+      - name: Docker build (no push)
+        run: docker build --build-arg GIT_SHA=${{ github.sha }} -t app:ci .
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform -chdir=infra fmt -check -recursive
+      - run: terraform -chdir=infra init -backend=false
+      - run: terraform -chdir=infra validate
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, terraform-validate]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required for GitHub OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume AWS role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: GIT_SHA=${{ github.sha }}
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:latest
+
+      - name: Smoke test (waits for App Runner to roll out this commit)
+        if: vars.SERVICE_URL != ''
+        run: ./scripts/smoke_test.sh "${{ vars.SERVICE_URL }}" "${{ github.sha }}"
