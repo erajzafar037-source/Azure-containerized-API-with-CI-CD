@@ -1,0 +1,4 @@
+github_repo    = "your-github-username/aws-fastapi-cicd"
+aws_region     = "us-east-1"
+deploy_service = false # flip to true after the first image is pushed
+alarm_email    = ""
